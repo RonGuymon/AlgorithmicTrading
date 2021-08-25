@@ -402,7 +402,21 @@ slopeCalcs <- function(df, nobs = 30, pval = .05, priceCol = 'currentPrice'){
   })
   return(slopeForLastObs[[1]])
 }
-# Trading Strategies----
+# Return----
+returnPct <- function(prices, n = 30, pct = T){
+  # prices is a vector of prices
+  # n is the length of the return
+  # pct is a logical value indicating whether you want the percentage return. If false, it will return the dollar change in price.
+  startingPrice <- prices[length(prices)-n+1]
+  mostRecentPrice <- prices[length(prices)]
+  rtn <- mostRecentPrice - startingPrice
+  if(pct == T){
+    rtn <- rtn/startingPrice
+  }
+  return(rtn)
+}
+# Signals----
+
 ## Backtest Trading Strategy 1 ----
 # Buy when the narrow window simple moving average is greater than the wide window sma
 # , and sells at the closing price when the narrow window sma is less than the wide window sma

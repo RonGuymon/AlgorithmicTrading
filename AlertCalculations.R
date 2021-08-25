@@ -158,6 +158,7 @@ if(hour(Sys.time()) < 8){
           , ticker = t
         )
       names(tdaily) <- gsub('^.*\\.', '', names(tdaily)) %>% tolower()
+      tdaily$rsi14 <- TTR::RSI(tdaily$adjusted, n = 14)
       daily %<>% bind_rows(tdaily)
       rm(tdaily)
     }
@@ -196,6 +197,7 @@ if(hour(Sys.time()) < 8){
         corSpy <- cor(bdf[,2:3])[1,2]
         beta <- corSpy*sd(bdf[,2][[1]])/sd(bdf[,3][[1]])
       }
+
       tg <- data.frame(ticker = t
                        , date = max(tdf$date)
                        , adjusted = tdf[nrow(tdf),] %>% pull(adjusted)
@@ -205,6 +207,8 @@ if(hour(Sys.time()) < 8){
                        , beta = beta
                        , ad_smaNarrow = tdf$ad_smaNarrow[nrow(tdf)]
                        , pctChange = tdf$pctChange[nrow(tdf)]
+                       , return60 = returnPct(tdaily$adjusted, n = 60)
+                       , return30 = returnPct(tdaily$adjusted, n = 30)
                        , stage = tdf$stage[nrow(tdf)]
       )
       gainersDaily %<>% bind_rows(tg)
