@@ -158,7 +158,7 @@ if(hour(Sys.time()) < 8){
           , ticker = t
         )
       names(tdaily) <- gsub('^.*\\.', '', names(tdaily)) %>% tolower()
-      tdaily$rsi14 <- TTR::RSI(tdaily$adjusted, n = 14)
+      # tdaily$rsi14 <- TTR::RSI(tdaily$adjusted, n = 14)
       daily %<>% bind_rows(tdaily)
       rm(tdaily)
     }

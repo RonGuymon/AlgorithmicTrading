@@ -6,6 +6,7 @@ library(magrittr)
 # library(xml2)
 library(rvest)
 library(httr)
+library(gridExtra)
 # Function: get a list of movers----
 # This function pulls the movers from the finviz.com home page
 getMovers <- function(){
@@ -415,7 +416,352 @@ returnPct <- function(prices, n = 30, pct = T){
   }
   return(rtn)
 }
-# Signals----
+# Mean Reversion Signals----
+mr_sansIndicators <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker', p = 6, viz = F, returns = F){
+  # https://www.youtube.com/watch?v=XVEbnqLk0-Q&t=373s&ab_channel=TheTransparentTrader
+  # Buy when the close is the lowest over the period, sell when it is the highest over the period
+  # df is a dataframe with at least two columns: closing price and date
+  # closingPriceCol is the name of the column that has the closing price
+  # dateCol is the name of the column that has the date
+  # tickerCol is the name of the column with the ticker symbol
+  # viz is a logical value indicating whether you want to return a plot
+  # returns is a logical value indicatin whether you want to return the abnormal returns for the period, defined as the return from the strategy vs. buy & hold during the period.
+  # Returns the signal for the most recent period, and 
+  
+  # Location and original name of closing price column
+  cpi <- which(names(df) == closingPriceCol)
+  cpo <- names(df)[cpi]
+  
+  # Location and original name of date column
+  di <- which(names(df) == dateCol)
+  do <- names(df)[di]
+  
+  # Location and original name of ticker column
+  ti <- which(names(df) == tickerCol)
+  if(length(ti) == 0){
+    ticker <- 'Unspecified Ticker'
+    to <- 'No col'
+  }else{
+    ticker <- unique(df[,ti])[1]
+    to <- names(df)[ti]
+  }
+  
+  
+  dfa <- data.frame(cp = df[,cpi])
+  for(i in 1:p){
+    dfa$cp1 <- data.frame(cp = c(rep(NA, i), dfa[1:(nrow(dfa)-i),'cp'])) %>% pull(cp)
+    names(dfa)[ncol(dfa)] <- paste0('cp_lag', i)
+  }
+  dfa$minVal <- apply(dfa,1,FUN = min, na.rm = T)
+  dfa$maxVal <- apply(dfa,1,FUN = max, na.rm = T)
+  dfa %<>% mutate(
+    signal = case_when(
+      cp == minVal ~ 'buy'
+      , cp == maxVal ~ 'sell'
+      , T ~ NA_character_
+    )
+  )
+  dfa$date <- df[,di]
+  returnList <- list()
+  returnList$signal <- dfa[nrow(dfa), 'signal']
+  returnList$currentRegime <- dfa %>% filter(!is.na(signal)) %>% .[nrow(.), 'signal']
+
+  # Calculate abnormal return - no short sales
+  if(returns == T){
+    buyHoldReturn <- (dfa[nrow(dfa),'cp'] - dfa[1,'cp'])/dfa[1,'cp']
+    
+    dfa %<>% mutate(
+      lastSignal = signal
+      , lastSignal = na.locf(lastSignal, na.rm = F)
+      , regimeSignal = case_when(
+        signal != dplyr::lag(lastSignal) ~ signal
+        , signal == lastSignal & is.na(dplyr::lag(signal)) & is.na(dplyr::lag(lastSignal)) ~ signal
+        , T ~ NA_character_)
+      , regimeDate = ifelse(!is.na(regimeSignal), date, NA)
+      , regimePrice = ifelse(!is.na(regimeSignal), cp, NA)
+      , regimeSignal = na.locf(regimeSignal, na.rm = F)
+      , regimeDate = na.locf(regimeDate, na.rm = F)
+      , regimePrice = na.locf(regimePrice, na.rm = F)
+    ) %>%
+      select(-lastSignal) %>%
+      group_by(regimeSignal, regimeDate) %>%
+      mutate(
+        return = ifelse(date == max(date) & regimeSignal == 'buy',
+                        cp - regimePrice,
+                        NA)
+      ) %>%
+      ungroup() %>%
+      mutate(
+        return = case_when(
+          regimeSignal == 'sell' & dplyr::lag(regimeSignal == 'buy') ~ cp - dplyr::lag(regimePrice)
+          , date == max(date, na.rm = T) ~ return)
+      )
+    basePrice <- dfa %>% filter(regimeSignal == 'buy') %>% .[1,'cp'] %>% .[[1]]
+    dollarReturn <- sum(dfa$return, na.rm = T)
+    strategyReturn <- dollarReturn/basePrice 
+    abnormalReturn <- strategyReturn - buyHoldReturn
+    returnList$buyHoldReturn <- buyHoldReturn
+    returnList$strategyReturn <- strategyReturn
+    returnList$abnormalReturn <- abnormalReturn
+  }
+  
+  # Create a plot if viz = T
+  if(viz == T){
+    if(returns == F){
+      subtitle <- ''
+    }else{
+      subtitle <- paste0('Abnormal return = ', round(abnormalReturn, 2), '(', round(strategyReturn,2), ' - ', round(buyHoldReturn, 2), ')')
+    }
+    dfl <- dfa %>%
+      mutate(
+        regimeSignal = ifelse(regimeSignal == dplyr::lag(regimeSignal), NA_character_, regimeSignal)
+      ) %>%
+      ggplot(aes(x = date, y = cp)) +
+      geom_point(aes(color = regimeSignal)) + 
+      geom_line() +
+      labs(title = paste0('Signal Chart for ', ticker, ' Using sansIndicators Strategy')
+           , x = 'Date'
+           , y = 'Closing Price'
+           , subtitle = subtitle)
+    returnList$viz <- dfl
+  }
+  
+  return(returnList)
+  
+}
+mr_sansIndicators1 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker', p = 6, smaMultiplier = 2, viz = F, returns = F){
+  # https://www.youtube.com/watch?v=XVEbnqLk0-Q&t=373s&ab_channel=TheTransparentTrader
+  # Buy when the close is the lowest over the period and above the sma, sell when it is the highest over the period
+  # df is a dataframe with at least two columns: closing price and date
+  # closingPriceCol is the name of the column that has the closing price
+  # dateCol is the name of the column that has the date
+  # p is the number of periods
+  # smaMultiplier is multiplied by p for calculating the sma
+  # viz is a logical value indicating whether you want to return a plot
+  # returns is a logical value indicatin whether you want to return the abnormal returns for the period, defined as the return from the strategy vs. buy & hold during the period.
+  # Returns the signal for the most recent period, and 
+  
+  # Location and original name of closing price column
+  cpi <- which(names(df) == closingPriceCol)
+  cpo <- names(df)[cpi]
+  
+  # Location and original name of date column
+  di <- which(names(df) == dateCol)
+  do <- names(df)[di]
+  
+  # Location and original name of ticker column
+  ti <- which(names(df) == tickerCol)
+  if(length(ti) == 0){
+    ticker <- 'Unspecified Ticker'
+    to <- 'No col'
+  }else{
+    ticker <- unique(df[,ti])[1]
+    to <- names(df)[ti]
+  }
+  
+  dfa <- data.frame(cp = df[,cpi])
+  for(i in 1:p){
+    dfa$cp1 <- data.frame(cp = c(rep(NA, i), dfa[1:(nrow(dfa)-i),'cp'])) %>% pull(cp)
+    names(dfa)[ncol(dfa)] <- paste0('cp_lag', i)
+  }
+  dfa$minVal <- apply(dfa,1,FUN = min, na.rm = T)
+  dfa$maxVal <- apply(dfa,1,FUN = max, na.rm = T)
+  dfa$sma <- TTR::SMA(dfa$cp, n = round(p*smaMultiplier))
+  dfa %<>% mutate(
+    signal = case_when(
+      cp == minVal & cp > sma ~ 'buy'
+      , cp == maxVal & cp < sma ~ 'sell'
+      , T ~ NA_character_
+    )
+  )
+  dfa$date <- df[,di]
+  returnList <- list()
+  returnList$signal <- dfa[nrow(dfa), 'signal']
+  returnList$currentRegime <- dfa %>% filter(!is.na(signal)) %>% .[nrow(.), 'signal']
+
+  # Calculate abnormal return - no short sales
+  if(returns == T){
+    buyHoldReturn <- (dfa[nrow(dfa),'cp'] - dfa[1,'cp'])/dfa[1,'cp']
+    
+    dfa %<>% mutate(
+      lastSignal = signal
+      , lastSignal = na.locf(lastSignal, na.rm = F)
+      , regimeSignal = case_when(
+        signal != dplyr::lag(lastSignal) ~ signal
+        , signal == lastSignal & is.na(dplyr::lag(signal)) & is.na(dplyr::lag(lastSignal)) ~ signal
+        , T ~ NA_character_)
+      , regimeDate = ifelse(!is.na(regimeSignal), date, NA)
+      , regimePrice = ifelse(!is.na(regimeSignal), cp, NA)
+      , regimeSignal = na.locf(regimeSignal, na.rm = F)
+      , regimeDate = na.locf(regimeDate, na.rm = F)
+      , regimePrice = na.locf(regimePrice, na.rm = F)
+    ) %>%
+      select(-lastSignal) %>%
+      group_by(regimeSignal, regimeDate) %>%
+      mutate(
+        return = ifelse(date == max(date) & regimeSignal == 'buy',
+                        cp - regimePrice,
+                        NA)
+      ) %>%
+      ungroup() %>%
+      mutate(
+        return = case_when(
+          regimeSignal == 'sell' & dplyr::lag(regimeSignal == 'buy') ~ cp - dplyr::lag(regimePrice)
+          , date == max(date, na.rm = T) ~ return)
+      )
+    basePrice <- dfa %>% filter(regimeSignal == 'buy') %>% .[1,'cp'] %>% .[[1]]
+    dollarReturn <- sum(dfa$return, na.rm = T)
+    strategyReturn <- dollarReturn/basePrice 
+    abnormalReturn <- strategyReturn - buyHoldReturn
+    returnList$buyHoldReturn <- buyHoldReturn
+    returnList$strategyReturn <- strategyReturn
+    returnList$abnormalReturn <- abnormalReturn
+  }
+  
+  # Create a plot if viz = T
+  if(viz == T){
+    if(returns == F){
+      subtitle <- ''
+    }else{
+      subtitle <- paste0('Abnormal return = ', round(abnormalReturn, 2), '(', round(strategyReturn,2), ' - ', round(buyHoldReturn, 2), ')')
+    }
+    dfl <- dfa %>%
+      select(date, cp, sma) %>%
+      pivot_longer(cols = c('cp', 'sma'), names_to = 'type', values_to = 'price') %>%
+      ggplot(aes(x = date, y = price, color = type)) +
+      geom_line() +
+      geom_text(data = dfa[,c('date', 'cp', 'signal')]
+                , aes(x = date, y = cp, label = signal, color = signal)) +
+      guides(color = F) +
+      labs(title = paste0('Signal Chart for ', ticker, ' Using sansIndicators1 Strategy')
+           , x = 'Date'
+           , y = 'Closing Price'
+           , subtitle = subtitle)
+    returnList$viz <- dfl
+  }
+  
+  return(returnList)
+    
+}
+mr_tb12 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker'
+                    , rsi_p = 2, rsi_min = 20, sma_p = 10, ema_p = 200, viz = F, returns = F){
+  # https://www.youtube.com/watch?v=1pjK2wdSqE4&ab_channel=TradingStrategyGuides
+  # Tim Black's strategy #12
+  # Buy when the rsi_2period < 10, price > sma_10, and price > ema_200
+  # Sell when price > sma_10
+  # Usually cash out within first three days
+  # df is a dataframe with at least two columns: closing price and date
+  # closingPriceCol is the name of the column that has the closing price
+  # dateCol is the name of the column that has the date
+  # rsi_p is the number of periods for the relative strength index
+  # sma_p is the number of periods for the simple moving average
+  # ema_p is the number of periods for the exponential moving average
+  # viz is a logical value indicating whether you want to return a plot
+  # returns is a logical value indicatin whether you want to return the abnormal returns for the period, defined as the return from the strategy vs. buy & hold during the period.
+  # Returns the signal for the most recent period, and 
+  
+  # Location and original name of closing price column
+  cpi <- which(names(df) == closingPriceCol)
+  cpo <- names(df)[cpi]
+  names(df)[cpi] <- 'cp'
+  
+  # Location and original name of date column
+  di <- which(names(df) == dateCol)
+  do <- names(df)[di]
+  
+  # Location and original name of ticker column
+  ti <- which(names(df) == tickerCol)
+  if(length(ti) == 0){
+    ticker <- 'Unspecified Ticker'
+    to <- 'No col'
+  }else{
+    ticker <- unique(df[,ti])[1]
+    to <- names(df)[ti]
+  }
+  if(nrow(df) < ema_p){
+    ema_p <- round(nrow(df)/2)
+  }
+  df$rsi <- TTR::RSI(df[,cpi], n = rsi_p)
+  df$sma <- TTR::SMA(df[,cpi], n = sma_p)
+  df$ema <- TTR::EMA(df[,cpi], n = ema_p)
+  
+  dfa <- df %>%
+    mutate(
+      buy = case_when(
+        rsi < rsi_min & cp < sma & cp > ema ~ 'buy'
+      )
+      , sell = case_when(
+        cp > sma ~ 'sell'
+      )
+      , signal = case_when(
+        buy == 'buy' ~ 'buy'
+        , sell == 'sell' ~ 'sell'
+      )
+      , signal = na.locf0(signal)
+      , signal = case_when(
+        is.na(signal) ~ NA_character_
+        , signal == 'sell' & dplyr::lag(signal) == 'sell' ~ NA_character_
+        , buy == 'buy' & dplyr::lag(buy) == 'buy' ~ NA_character_
+        , T ~ signal
+      )
+      , regimeDate = ifelse(signal == 'buy', date, NA)
+      , regimeDate = na.locf0(regimeDate)
+      , regimeDate = ifelse(is.na(signal), NA, regimeDate)
+      , regimePrice = ifelse(signal == 'buy', cp, NA)
+      , regimePrice = na.locf0(regimePrice)
+      , regimePrice = ifelse(is.na(signal), NA, regimePrice)
+      , return = ifelse(signal == 'sell', (cp - regimePrice)/cp, NA)
+      ) %>%
+    select(-buy, -sell)
+
+  
+  # Calculate abnormal return - no short sales
+  if(returns == T){
+    buyHoldReturn <- (dfa[nrow(dfa),'cp'] - dfa[1,'cp'])/dfa[1,'cp']
+   
+    basePrice <- dfa %>% filter(regimeSignal == 'buy') %>% .[1,'cp'] %>% .[[1]]
+    dollarReturn <- sum(dfa$return, na.rm = T)
+    strategyReturn <- dollarReturn/basePrice 
+    abnormalReturn <- strategyReturn - buyHoldReturn
+    returnList$buyHoldReturn <- buyHoldReturn
+    returnList$strategyReturn <- strategyReturn
+    returnList$abnormalReturn <- abnormalReturn
+  }
+  
+  # Create a plot if viz = T
+  if(viz == T){
+    if(returns == F){
+      subtitle <- ''
+    }else{
+      subtitle <- paste0('Abnormal return = ', round(abnormalReturn, 2), '(', round(strategyReturn,2), ' - ', round(buyHoldReturn, 2), ')')
+    }
+    dfl <- dfa %>%
+      select(date, cp, sma, ema) %>%
+      pivot_longer(cols = c('cp', 'sma', 'ema'), names_to = 'type', values_to = 'price') %>%
+      ggplot(aes(x = date, y = price, color = type)) +
+      geom_line() +
+      labs(title = paste0('Signal Chart for ', ticker, ' Using mr_tb12 Strategy')
+           , x = 'Date'
+           , y = 'Closing Price'
+           , subtitle = subtitle) +
+      guides(color = F)
+    if('buy' %in% dfa$signal){
+      dfl <- dfl +
+        geom_text(data = dfa[,c('date', 'cp', 'signal')]
+                  , aes(x = date, y = cp, label = signal, color = signal))
+    } 
+    rsi <- dfa %>%
+      select(date, rsi) %>%
+      ggplot(aes(x = date, y = rsi)) +
+      geom_line()
+    plt <- grid.arrange(dfl, rsi, nrow = 2)
+    returnList$viz <- plt
+  }
+  
+  return(returnList)
+  
+}
+
 
 ## Backtest Trading Strategy 1 ----
 # Buy when the narrow window simple moving average is greater than the wide window sma
