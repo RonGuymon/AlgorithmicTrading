@@ -6,6 +6,7 @@ library(zoo)
 library(googlesheets4)
 library(here) # Sets the working directory regardless of the machine I'm on
 source('algoFuncs.R')
+source('Tokens.R')
 # Alerts----
 # Buy based on simple moving average crossing
 # Sell based on simple moving average crossing (stop quote)
@@ -158,72 +159,36 @@ if(hour(Sys.time()) < 8){
           , ticker = t
         )
       names(tdaily) <- gsub('^.*\\.', '', names(tdaily)) %>% tolower()
-      # tdaily$rsi14 <- TTR::RSI(tdaily$adjusted, n = 14)
-      daily %<>% bind_rows(tdaily)
-      rm(tdaily)
-    }
-    
-    # Calculate moving averages and estimate current slope
-    dailym <- daily  %>%
-      drop_na() %>%
-      arrange(ticker, date) %>%
-      select(ticker, date, adjusted)
-    dailym <- movingAverage(allDaily = dailym, n = 10, w = 20
-                            , priceCol = 'adjusted', dateCol = 'date')
-    
-    gainersDaily <- data.frame()
-    for(t in unique(dailym$ticker)){
-      cat(t, '\r')
-      tdf <- dailym %>% filter(ticker == !! t)
-      slopeEstimate <- slopeCalcs(df = tdf, nobs = 60, priceCol = 'adjusted')
-      
-      # 60-day beta calc
-      if(t == 'spy'){
-        beta <- 1
-      }else{
-        bdf <- dailym %>% 
-          filter(ticker %in% c(t, 'spy')) %>%
-          filter(date >= Sys.Date()-60) %>%
-          select(ticker, date, adjusted) %>%
-          group_by(ticker) %>%
-          mutate(
-            return = (adjusted - dplyr::lag(adjusted))/dplyr::lag(adjusted)
-          ) %>%
-          ungroup() %>%
-          select(-adjusted) %>%
-          pivot_wider(names_from = 'ticker', values_from = 'return') %>%
-          drop_na() %>%
-          select(date, !!t, spy)
-        corSpy <- cor(bdf[,2:3])[1,2]
-        beta <- corSpy*sd(bdf[,2][[1]])/sd(bdf[,3][[1]])
-      }
-
-      tg <- data.frame(ticker = t
-                       , date = max(tdf$date)
-                       , adjusted = tdf[nrow(tdf),] %>% pull(adjusted)
-                       , buySell = tdf$buySell[nrow(tdf)]
-                       , slopeEstimate = slopeEstimate
-                       , rollingCv_20 = tdf$rollingCv_20[nrow(tdf)]
-                       , beta = beta
-                       , ad_smaNarrow = tdf$ad_smaNarrow[nrow(tdf)]
-                       , pctChange = tdf$pctChange[nrow(tdf)]
-                       , return60 = returnPct(tdaily$adjusted, n = 60)
-                       , return30 = returnPct(tdaily$adjusted, n = 30)
-                       , stage = tdf$stage[nrow(tdf)]
+      tdf <- tdaily
+      tdf <- na.omit(tdf)
+      nrows <- nrow(tdf)
+      tddaily <- data.frame(
+        ticker = t
+        , price = tdf[nrows, 'adjusted']
+        , return_10 = (tdf[nrows, 'adjusted'] - tdf[(nrows-9), 'adjusted'])/tdf[(nrows-9), 'adjusted']
+        , return_30 = (tdf[nrows, 'adjusted'] - tdf[(nrows-29), 'adjusted'])/tdf[(nrows-29), 'adjusted']
+        , return_60 = (tdf[nrows, 'adjusted'] - tdf[(nrows-59), 'adjusted'])/tdf[(nrows-59), 'adjusted']
+        , mr_sansIndictor = mr_sansIndicators(tdf, closingPriceCol = 'adjusted'
+                                              , dateCol = 'date', tickerCol = 'ticker'
+                                              , p = 6, viz = F, returns = F)$signal
+        , mr_sansIndictor1 = mr_sansIndicators1(tdf, closingPriceCol = 'adjusted'
+                                                , dateCol = 'date', tickerCol = 'ticker'
+                                                , p = 6, viz = F, returns = F)$signal
+        , mr_tb12 = mr_tb12(df = tdf, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker'
+                            , rsi_p = 2, rsi_min = 20, sma_p = 10, ema_p = 200, viz = F, returns = F)$signal
       )
-      gainersDaily %<>% bind_rows(tg)
-      rm(tdf, slopeEstimate, tg, bdf, corSpy, beta)
+      daily %<>% bind_rows(tddaily)
+      rm(tddaily)
     }
-    gainersDaily %<>% 
+
+    
+
+    
+    daily %<>%
       mutate(
-        stageForWeight = ifelse(buySell == 'sell', -1*stage, stage)
-        , weightedScore = (slopeEstimate + ad_smaNarrow + pctChange + 1/stageForWeight)/4
+        ema_return = (1/10*return_10 + 1/30*return_30 + 1/60*return_60)/(.1+(1/30)+(1/60))
       ) %>%
-      mutate(
-        across(.cols = c(slopeEstimate:pctChange, weightedScore), .fns = round, 3)
-      ) %>%
-      arrange(desc(weightedScore)) %>%
-      select(-stageForWeight)
+      arrange(desc(ema_return))
     
     # ## Visualizations----
     # tickerToGet <- 'tsco'
@@ -235,23 +200,23 @@ if(hour(Sys.time()) < 8){
     #   labs(title = tickerToGet)
     
     ## Put the gainers data on the google Sheet----
-    write_sheet(gainersDaily, ss = Sys.getenv('stockSheetsKey'), sheet = 'gainersDaily')
+    write_sheet(daily, ss = Sys.getenv('stockSheetsKey'), sheet = 'gainersDaily')
     
     ### Create alert messages for daily trades----
     #### Sell a stock that I'm holding----
     # If stock price with a stop quote is a sell then recommend the top of the gainers list
-    ownSell <- stocks %>%
-      left_join(gainersDaily[,c('ticker', 'buySell')], by = 'ticker') %>%
-      filter(type == 'own' & buySell == 'sell')
-    
-    if(nrow(ownSell) > 0 & alerts %>% filter(alertType == 'daily') %>% pull(yesOrNo) == 'yes'){
-      msg <- paste(ownSell$ticker, collapse =', ')
-      replacements <- paste(gainersDaily$ticker[1:nrow(ownSell)], collapse = ', ')
-      tempMsg <- data.frame(msg = paste0('Time to sell these stocks: ', msg
-                                         , '. Consider replacing with these stocks: ', replacements))
-      alertMessages %<>% bind_rows(tempMsg)
-      rm(msg, tempMsg)
-    }
+    # ownSell <- stocks %>%
+    #   left_join(daily[,c('ticker', 'buySell')], by = 'ticker') %>%
+    #   filter(type == 'own' & buySell == 'sell')
+    # 
+    # if(nrow(ownSell) > 0 & alerts %>% filter(alertType == 'daily') %>% pull(yesOrNo) == 'yes'){
+    #   msg <- paste(ownSell$ticker, collapse =', ')
+    #   replacements <- paste(ddaily$ticker[1:nrow(ownSell)], collapse = ', ')
+    #   tempMsg <- data.frame(msg = paste0('Time to sell these stocks: ', msg
+    #                                      , '. Consider replacing with these stocks: ', replacements))
+    #   alertMessages %<>% bind_rows(tempMsg)
+    #   rm(msg, tempMsg)
+    # }
   }
 }
 

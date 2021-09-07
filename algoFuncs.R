@@ -417,7 +417,9 @@ returnPct <- function(prices, n = 30, pct = T){
   return(rtn)
 }
 # Mean Reversion Signals----
-mr_sansIndicators <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker', p = 6, viz = F, returns = F){
+mr_sansIndicators <- function(df, closingPriceCol = 'adjusted'
+                              , dateCol = 'date', tickerCol = 'ticker'
+                              , p = 6, viz = F, returns = F){
   # https://www.youtube.com/watch?v=XVEbnqLk0-Q&t=373s&ab_channel=TheTransparentTrader
   # Buy when the close is the lowest over the period, sell when it is the highest over the period
   # df is a dataframe with at least two columns: closing price and date
@@ -493,12 +495,11 @@ mr_sansIndicators <- function(df, closingPriceCol = 'adjusted', dateCol = 'date'
       ungroup() %>%
       mutate(
         return = case_when(
-          regimeSignal == 'sell' & dplyr::lag(regimeSignal == 'buy') ~ cp - dplyr::lag(regimePrice)
+          regimeSignal == 'sell' & dplyr::lag(regimeSignal == 'buy') ~ (cp - dplyr::lag(regimePrice))/cp
           , date == max(date, na.rm = T) ~ return)
       )
     basePrice <- dfa %>% filter(regimeSignal == 'buy') %>% .[1,'cp'] %>% .[[1]]
-    dollarReturn <- sum(dfa$return, na.rm = T)
-    strategyReturn <- dollarReturn/basePrice 
+    strategyReturn <- sum(dfa$return, na.rm = T)
     abnormalReturn <- strategyReturn - buyHoldReturn
     returnList$buyHoldReturn <- buyHoldReturn
     returnList$strategyReturn <- strategyReturn
@@ -529,7 +530,9 @@ mr_sansIndicators <- function(df, closingPriceCol = 'adjusted', dateCol = 'date'
   return(returnList)
   
 }
-mr_sansIndicators1 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker', p = 6, smaMultiplier = 2, viz = F, returns = F){
+mr_sansIndicators1 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date'
+                               , tickerCol = 'ticker', p = 6, smaMultiplier = 2
+                               , viz = F, returns = F){
   # https://www.youtube.com/watch?v=XVEbnqLk0-Q&t=373s&ab_channel=TheTransparentTrader
   # Buy when the close is the lowest over the period and above the sma, sell when it is the highest over the period
   # df is a dataframe with at least two columns: closing price and date
@@ -600,7 +603,7 @@ mr_sansIndicators1 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date
       group_by(regimeSignal, regimeDate) %>%
       mutate(
         return = ifelse(date == max(date) & regimeSignal == 'buy',
-                        cp - regimePrice,
+                        (cp - regimePrice)/cp,
                         NA)
       ) %>%
       ungroup() %>%
@@ -610,8 +613,7 @@ mr_sansIndicators1 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date
           , date == max(date, na.rm = T) ~ return)
       )
     basePrice <- dfa %>% filter(regimeSignal == 'buy') %>% .[1,'cp'] %>% .[[1]]
-    dollarReturn <- sum(dfa$return, na.rm = T)
-    strategyReturn <- dollarReturn/basePrice 
+    strategyReturn <- sum(dfa$return, na.rm = T) 
     abnormalReturn <- strategyReturn - buyHoldReturn
     returnList$buyHoldReturn <- buyHoldReturn
     returnList$strategyReturn <- strategyReturn
@@ -681,6 +683,7 @@ mr_tb12 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCo
   if(nrow(df) < ema_p){
     ema_p <- round(nrow(df)/2)
   }
+  df %<>% drop_na()
   df$rsi <- TTR::RSI(df[,cpi], n = rsi_p)
   df$sma <- TTR::SMA(df[,cpi], n = sma_p)
   df$ema <- TTR::EMA(df[,cpi], n = ema_p)
@@ -702,6 +705,7 @@ mr_tb12 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCo
         is.na(signal) ~ NA_character_
         , signal == 'sell' & dplyr::lag(signal) == 'sell' ~ NA_character_
         , buy == 'buy' & dplyr::lag(buy) == 'buy' ~ NA_character_
+        , signal == 'buy' & dplyr::lag(signal) == 'buy' ~ NA_character_
         , T ~ signal
       )
       , regimeDate = ifelse(signal == 'buy', date, NA)
@@ -713,16 +717,16 @@ mr_tb12 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCo
       , return = ifelse(signal == 'sell', (cp - regimePrice)/cp, NA)
       ) %>%
     select(-buy, -sell)
-
+  returnList <- list()
+  returnList$signal <- dfa$signal[nrow(dfa)]
+  returnList$data <- dfa
   
   # Calculate abnormal return - no short sales
   if(returns == T){
     buyHoldReturn <- (dfa[nrow(dfa),'cp'] - dfa[1,'cp'])/dfa[1,'cp']
-   
-    basePrice <- dfa %>% filter(regimeSignal == 'buy') %>% .[1,'cp'] %>% .[[1]]
-    dollarReturn <- sum(dfa$return, na.rm = T)
-    strategyReturn <- dollarReturn/basePrice 
+    strategyReturn <- sum(dfa$return, na.rm = T) 
     abnormalReturn <- strategyReturn - buyHoldReturn
+    
     returnList$buyHoldReturn <- buyHoldReturn
     returnList$strategyReturn <- strategyReturn
     returnList$abnormalReturn <- abnormalReturn
