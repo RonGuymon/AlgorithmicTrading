@@ -6,6 +6,7 @@ library(zoo)
 library(googlesheets4)
 library(here) # Sets the working directory regardless of the machine I'm on
 source('algoFuncs.R')
+source('getListOfCompanies.R')
 source('Tokens.R')
 # Alerts----
 # Buy based on simple moving average crossing
@@ -147,38 +148,53 @@ if(hour(Sys.time()) < 8){
     )
   if(max(spyCheck$date, na.rm = T) != max(gd$date, na.rm = T)){
     daily <- data.frame()
-    stocksToGet <- unique(c(stocks$ticker, 'spy', 'gc=f')) # gc=f is gold
+    nd <- getNASDAQ()
+    sp <- getSP500()
+    dj <- getDJ()
+    allIndices <- bind_rows(nd, sp, dj) %>%
+      arrange(desc(pct_chg)) %>%
+      dplyr::distinct(ticker) %>%
+      pull(ticker)
+    stocksToGet <- unique(c(stocks$ticker, allIndices, 'spy', 'gc=f') %>% tolower()) # gc=f is gold
+    rm(nd, sp, dj, allIndices)
+    stgl <- length(stocksToGet)
+    progNum <- 0
     for(t in stocksToGet){
-      cat(t, '\n')
-      tdaily <- getSymbols(t, auto.assign = F) %>% 
-        as.data.frame() %>%
-        rownames_to_column() %>%
-        rename(date = rowname) %>%
-        mutate(
-          date = ymd(date)
-          , ticker = t
-        )
-      names(tdaily) <- gsub('^.*\\.', '', names(tdaily)) %>% tolower()
-      tdf <- tdaily
-      tdf <- na.omit(tdf)
-      nrows <- nrow(tdf)
-      tddaily <- data.frame(
-        ticker = t
-        , price = tdf[nrows, 'adjusted']
-        , return_10 = (tdf[nrows, 'adjusted'] - tdf[(nrows-9), 'adjusted'])/tdf[(nrows-9), 'adjusted']
-        , return_30 = (tdf[nrows, 'adjusted'] - tdf[(nrows-29), 'adjusted'])/tdf[(nrows-29), 'adjusted']
-        , return_60 = (tdf[nrows, 'adjusted'] - tdf[(nrows-59), 'adjusted'])/tdf[(nrows-59), 'adjusted']
-        , mr_sansIndictor = mr_sansIndicators(tdf, closingPriceCol = 'adjusted'
-                                              , dateCol = 'date', tickerCol = 'ticker'
-                                              , p = 6, viz = F, returns = F)$signal
-        , mr_sansIndictor1 = mr_sansIndicators1(tdf, closingPriceCol = 'adjusted'
+      progNum <- progNum + 1
+      cat(t, progNum, '\n')
+      tryCatch({
+        tdaily <- getSymbols(t, auto.assign = F) %>% 
+          as.data.frame() %>%
+          rownames_to_column() %>%
+          rename(date = rowname) %>%
+          mutate(
+            date = ymd(date)
+            , ticker = t
+          )
+        names(tdaily) <- gsub('^.*\\.', '', names(tdaily)) %>% tolower()
+        tdf <- tdaily
+        tdf <- na.omit(tdf)
+        nrows <- nrow(tdf)
+        tddaily <- data.frame(
+          ticker = t
+          , price = tdf[nrows, 'adjusted']
+          , return_10 = (tdf[nrows, 'adjusted'] - tdf[(nrows-9), 'adjusted'])/tdf[(nrows-9), 'adjusted']
+          , return_30 = (tdf[nrows, 'adjusted'] - tdf[(nrows-29), 'adjusted'])/tdf[(nrows-29), 'adjusted']
+          , return_60 = (tdf[nrows, 'adjusted'] - tdf[(nrows-59), 'adjusted'])/tdf[(nrows-59), 'adjusted']
+          , mr_sansIndictor = mr_sansIndicators(tdf, closingPriceCol = 'adjusted'
                                                 , dateCol = 'date', tickerCol = 'ticker'
                                                 , p = 6, viz = F, returns = F)$signal
-        , mr_tb12 = mr_tb12(df = tdf, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker'
-                            , rsi_p = 2, rsi_min = 20, sma_p = 10, ema_p = 200, viz = F, returns = F)$signal
-      )
-      daily %<>% bind_rows(tddaily)
-      rm(tddaily)
+          , mr_sansIndictor1 = mr_sansIndicators1(tdf, closingPriceCol = 'adjusted'
+                                                  , dateCol = 'date', tickerCol = 'ticker'
+                                                  , p = 6, viz = F, returns = F)$signal
+          , mr_tb12 = mr_tb12(df = tdf, closingPriceCol = 'adjusted', dateCol = 'date', tickerCol = 'ticker'
+                              , rsi_p = 2, rsi_min = 20, sma_p = 10, ema_p = 200, viz = F, returns = F)$signal
+        )
+        daily %<>% bind_rows(tddaily)
+        rm(tddaily)
+      }, error = function(e){
+        cat('Problem with', t, progNum, '\n')
+      })
     }
 
     
