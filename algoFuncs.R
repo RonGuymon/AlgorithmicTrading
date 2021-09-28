@@ -254,7 +254,7 @@ getCurrentInfoFinnhub <- function(ticker = 'TSLA', apikey = finnHubApiKey, colsT
 }
 # getCurrentInfoFinnhub(ticker = 'pfe')
 # Social Sentiment----
-getSentimentFinnhub <- function(ticker = 'TSLA', apikey = finnHubApiKey){
+getSocialSentimentFinnhub <- function(ticker = 'TSLA', apikey = finnHubApiKey){
   # This function uses Finnhub
   ticker <- toupper(ticker)
   url <- paste0('https://finnhub.io/api/v1/stock/social-sentiment?symbol=',ticker,'&token=', apikey)
@@ -268,7 +268,67 @@ getSentimentFinnhub <- function(ticker = 'TSLA', apikey = finnHubApiKey){
     )
   return(df)
 }
-# getSentimentFinnhub(ticker = 'XM')
+# News Sentiment----
+getNewsSentimentFinnhub <- function(ticker = 'TSLA', apikey = finnHubApiKey){
+  # This function uses Finnhub
+  ticker <- toupper(ticker)
+  url <- paste0('https://finnhub.io/api/v1/news-sentiment?symbol=',ticker,'&token=', apikey)
+  urlContents <- httr::GET(url)
+  df <- rawToChar(urlContents$content) %>% 
+    jsonlite::fromJSON() %>% 
+    unlist() %>%
+    t() %>%
+    as.data.frame() %>%
+    rename(ticker = symbol)
+  return(df)
+}
+# Company News----
+getCompanyNewsFinnhub <- function(ticker = 'TSLA', fromDate = Sys.Date()-364, toDate = Sys.Date(), apikey = finnHubApiKey){
+  # This function uses Finnhub
+  ticker <- toupper(ticker)
+  url <- paste0('https://finnhub.io/api/v1/company-news?symbol=',ticker,'&from=',fromDate,'&to=',toDate,'&token=', apikey)
+  urlContents <- httr::GET(url)
+  df <- rawToChar(urlContents$content) %>% 
+    jsonlite::fromJSON() %>%
+    as.data.frame() %>%
+    mutate(
+      datetime = as.POSIXct(datetime, origin = '1970-01-01')
+    )
+  return(df)
+}
+
+# Market News----
+getMarketNewsFinnhub <- function(category = 'general', apikey = finnHubApiKey){
+  # This function uses Finnhub
+  # Category can be one of four: general, forex, crypto, merger
+  url <- paste0('https://finnhub.io/api/v1/news?category=',category,'&token=', apikey)
+  urlContents <- httr::GET(url)
+  df <- rawToChar(urlContents$content) %>% 
+    jsonlite::fromJSON() %>%
+    as.data.frame() %>%
+    mutate(
+      datetime = as.POSIXct(datetime, origin = '1970-01-01')
+    )
+  return(df)
+}
+
+# Peers----
+getPeersFinnhub <- function(ticker = 'xm', apikey = finnHubApiKey){
+  # This function uses Finnhub
+  ticker <- toupper(ticker)
+  url <- paste0('https://finnhub.io/api/v1/stock/peers?symbol=',ticker,'&token=', apikey)
+  urlContents <- httr::GET(url)
+  df <- rawToChar(urlContents$content) %>% 
+    jsonlite::fromJSON() %>%
+    as.data.frame() %>%
+    mutate(
+      ticker = ticker
+    )
+  names(df) <- c('peerTicker', 'ticker')
+  df <- df[,c('ticker', 'peerTicker')]
+  return(df)
+}
+
 # Earnings Calendar----
 earningsCalendar <- function(startDate = as.character(Sys.Date()), endDate = as.character(Sys.Date()+5), apikey = finnHubApiKey){
   # This function uses Finnhub

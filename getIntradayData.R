@@ -9,6 +9,7 @@ library(rvest)
 library(googlesheets4)
 library(here)
 source('algoFuncs.R')
+source('Tokens.R')
 # Read in sheet with stocks that are owned and being watched----
 # stocks <- read.csv('stocks.csv') %>%
 #   mutate(
@@ -79,7 +80,7 @@ stocksToGet <- c(unique(prices$ticker), stockWatch$ticker) %>%
 bt <- Sys.time()
 for(t in stocksToGet){
   cat(t, '\n')
-  tp <- getCurrentInfoFinnhub(ticker = t)
+  tp <- getCurrentInfoFinnhub(ticker = t, apikey = Sys.getenv('finnHubApiKey'))
   prices %<>% bind_rows(tp)
 }
 et <- Sys.time()
