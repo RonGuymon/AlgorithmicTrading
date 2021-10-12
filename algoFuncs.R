@@ -825,7 +825,88 @@ mr_tb12 <- function(df, closingPriceCol = 'adjusted', dateCol = 'date', tickerCo
   return(returnList)
   
 }
+# Diverging Strategy----
+divergingStrategy <- function(df, periods = 20, rsiPeriod = 21){
+  edf <- df %>% 
+    group_by(ticker) %>%
+    summarise(n = n()) %>%
+    ungroup() %>%
+    filter(n > periods + 1 & n > rsiPeriod + 1)
+  
+  tdf <- df %>%
+    filter(ticker %in% edf$ticker) %>%
+    arrange(ticker, time) %>%
+    rownames_to_column() %>%
+    group_by(ticker) %>%
+    mutate(
+      maxPrice = zoo::rollmax(currentPrice, periods, align = 'right', fill = NA)
+      , maxPrice = dplyr::lag(maxPrice)
+      , minPrice = zoo::rollapplyr(currentPrice, periods, align = 'right', fill = NA, FUN = min)
+      , minPrice = dplyr::lag(minPrice)
+      , rsi = TTR::RSI(currentPrice, n = rsiPeriod)
+      , rowname = as.numeric(rowname)
+    ) %>%
+    ungroup()
+  # Find the row that has the minPrice and match up the rsi from that row with the minPrice
+  # I do this by creating a dataframe, rsiChangeTable that only has the min prices, rowname, and rsi
+  # Then I join it by matching the minPrice with the currentPrice and remove duplicates.
+  # Removing duplicates is what makes the code so long
+  rsiChangeTable <- tdf %>%
+    filter(currentPrice %in% minPrice) %>%
+    select(rowname, currentPrice, rsi) %>%
+    rename(rownameCheck = rowname, rsiLag_pLessMin = rsi)
+  tdf %<>% left_join(rsiChangeTable, by = c('minPrice' = 'currentPrice')) %>%
+    mutate(
+      drop = case_when(
+        rownameCheck < rowname - periods ~ 1
+        , rownameCheck > rowname ~ 1
+        , T ~ 0
+      )
+    ) %>%
+    filter(drop == 0) %>%
+    select(-rownameCheck, -drop) %>%
+    .[!duplicated(.$rowname),]
+  # Repeat this process for the max price
+  rsiChangeTable <- tdf %>%
+    filter(currentPrice %in% maxPrice) %>%
+    select(rowname, currentPrice, rsi) %>%
+    rename(rownameCheck = rowname, rsiLag_pLessMax = rsi)
+  tdf %<>% left_join(rsiChangeTable, by = c('maxPrice' = 'currentPrice')) %>%
+    mutate(
+      drop = case_when(
+        rownameCheck < rowname - periods ~ 1
+        , rownameCheck > rowname ~ 1
+        , T ~ 0
+      )
+    ) %>%
+    filter(drop == 0) %>%
+    select(-rownameCheck, -drop) %>%
+    .[!duplicated(.$rowname),]
+  # Compute the signal
+  tdf %<>%
+    mutate(
+      pLessMin = round(currentPrice - minPrice, 4)
+      , pLessMax = round(currentPrice - maxPrice, 4)
+      , rsiChangeMin = round(rsi - rsiLag_pLessMin, 4)
+      , rsiChangeMax = round(rsi - rsiLag_pLessMax, 4)
+      , divergence = case_when(
+        pLessMin < 0 & rsiChangeMin > 0 ~ 'buy'
+        , pLessMax > 0 & rsiChangeMax < 0 ~ 'sell'
+        , T ~ 'hold')
+      , divergence = case_when(
+        divergence == 'buy' ~ paste0(divergence, ': price action = ', round(pLessMin, 2)
+                                     , ', rsi_',periods,' change = ', round(rsiChangeMin, 2))
+        , divergence == 'sell' ~ paste0(divergence, ': price action = ', round(pLessMax, 2)
+                                        , ', rsi_',periods,' change = ', round(rsiChangeMax, 2))
+      )
+    ) %>%
+    select(-rowname)
+    # filter(time == max(time, na.rm = T)) %>%
+    #   filter(divergence != 'hold') %>%
+    #   select(ticker, time, divergence)
 
+  return(tdf)
+}
 
 ## Backtest Trading Strategy 1 ----
 # Buy when the narrow window simple moving average is greater than the wide window sma

@@ -24,8 +24,8 @@ source('Tokens.R')
 suppressWarnings(gs4_auth(email = Sys.getenv('googleSheetsEmail')
                           , token = "gToken.rds")) # Auto refreshes stale oAuth token
 # allSheets <- gs4_find(gToken) # Read in the metadata for all files in the account. Only need to run the first time to get the sheet key.
-suppressMessages(stocks <- read_sheet(Sys.getenv('stockSheetsKey'), sheet = 1
-                                       , col_types = 'cddd'))
+suppressMessages(stocks <- read_sheet(Sys.getenv('stockSheetsKey'), sheet = 'stocks'
+                                       , col_types = 'cdddc'))
 stocks %<>%
   mutate(
     type = ifelse(is.na(qty), 'watch', 'own')
@@ -67,12 +67,12 @@ stockWatch <- trending[1:5,] %>%
 
 # Read in existing data----
 prices <- readRDS('pricesIntraday.rds') %>%
-  mutate(
-    ticker = tolower(ticker)
-  )
+mutate(
+  ticker = tolower(ticker)
+)
 # Get current information and combine with existing----
-# prices <- data.frame()
-stocksToGet <- c(unique(prices$ticker), stockWatch$ticker) %>% 
+# stocksToGet <- c(unique(prices$ticker), stockWatch$ticker) %>% 
+stocksToGet <- c(stockWatch$ticker) %>% 
   unique() %>%
   .[1:55] %>%
   .[which(!is.na(.))]
@@ -80,12 +80,19 @@ stocksToGet <- c(unique(prices$ticker), stockWatch$ticker) %>%
 bt <- Sys.time()
 for(t in stocksToGet){
   cat(t, '\n')
-  tp <- getCurrentInfoFinnhub(ticker = t, apikey = Sys.getenv('finnHubApiKey'))
-  prices %<>% bind_rows(tp)
+  tryCatch({
+    tp <- getCurrentInfoFinnhub(ticker = t, apikey = Sys.getenv('finnHubApiKey'))
+    prices %<>% bind_rows(tp)
+  }, error = function(e){
+    cat('Problem with', t)
+  })
 }
 et <- Sys.time()
 difftime(et, bt)
-prices %<>% dplyr::filter(!is.na(ticker))
+prices %<>% dplyr::filter(!is.na(ticker)) %>%
+  mutate(
+    ticker = tolower(ticker)
+  )
 
 # Get rid of prices that are after hours----
 # pricesToDelete <- prices %>%

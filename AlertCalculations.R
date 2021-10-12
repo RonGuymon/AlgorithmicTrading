@@ -5,6 +5,7 @@ library(lubridate)
 library(magrittr)
 library(quantmod)
 library(zoo)
+library(TTR)
 library(googlesheets4)
 library(here) # Sets the working directory regardless of the machine I'm on
 source('algoFuncs.R')
@@ -28,7 +29,7 @@ suppressWarnings(gs4_auth(email = Sys.getenv('googleSheetsEmail')
 # allSheets <- gs4_find(gToken) # Read in the metadata for all files in the account. Only need to run the first time to get the sheet key.
 # System environment variable: stockSheetsKey
 suppressMessages(stocks <- read_sheet(Sys.getenv('stockSheetsKey'), sheet = 'stocks'
-                                      , col_types = 'cddd'))
+                                      , col_types = 'cdddc'))
 stocks %<>%
   mutate(
     type = ifelse(is.na(qty), 'watch', 'own')
@@ -48,6 +49,40 @@ idm <- id  %>%
   .[!duplicated(.[,c('time', 'ticker')]),] %>%
   arrange(ticker, time) %>%
   filter(time >= Sys.Date())
+# Calculate the min and max values during a period of time----
+# I don't use the group_by function because if there are not enough periods for a ticker then an error is thrown
+maxMinPeriods <- c(10,15,20,25,30)
+gains <- data.frame()
+for(mp in maxMinPeriods){
+  cat('Diverging strategy with periods =', mp, '\n')
+  tdf <- divergingStrategy(df = idm, periods = mp) %>%
+    group_by(ticker) %>%
+    filter(time == max(time, na.rm = T)) %>%
+    select(ticker, time, divergence) %>%
+    filter(!is.na(divergence))
+    if(nrow(tdf) > 0){
+      names(tdf)[ncol(tdf)] <- paste0('divergence_', mp)
+      if(nrow(gains) == 0){
+        gains <- tdf
+      }else{
+        tdf %<>% rename(time2 = time)
+        gains %<>% full_join(tdf, by = 'ticker')
+        if('time2' %in% names(gains)){
+          gains %<>%
+            mutate(
+              time = ifelse(is.na(time), time2, time)
+            ) %>%
+            select(-time2)
+        }
+      }
+    }
+  }
+gains %<>% mutate(
+  time = as.POSIXct(time, origin = '1970-01-01')
+)
+
+
+
 # Create returns from the beginning of the day
 maxPeriods <- idm %>% group_by(ticker) %>% 
   mutate(n = n()) %>% 
@@ -57,7 +92,6 @@ maxPeriods <- idm %>% group_by(ticker) %>%
 maxPeriods <- maxPeriods - 1
 rtnWindows <- c(1,3,5,10,15,20,25,30,60,90,120,150,180,210,240)
 rtnWindows <- unique(sort(c(maxPeriods, rtnWindows))) %>% .[. <= maxPeriods]
-gains <- data.frame()
 for(rw in rtnWindows){
   cat(rw, '\n')
   tdf <- idm %>%
@@ -71,18 +105,18 @@ for(rw in rtnWindows){
     select(ticker, newReturn) %>%
     unique()
   names(tdf)[ncol(tdf)] <- paste0('return_', rw)
-  if(rw == min(rtnWindows)){
+  if(nrow(gains) == 0){
     gains <- tdf
   }else{
-    gains %<>% left_join(tdf, by = 'ticker')
+    gains %<>% full_join(tdf, by = 'ticker')
   }
 }
 
-
+# Calculate RSI
 for(ts in unique(idm$ticker)){
   cat(ts, '\n')
   tryCatch({
-    tdf <- idm %>% filter(ticker == ts) %>%arrange(time)
+    tdf <- idm %>% filter(ticker == ts) %>% arrange(time)
     if(nrow(tdf) < 16){
       rsiWindow <- nrow(tdf)-2
     }else{
@@ -96,10 +130,16 @@ for(ts in unique(idm$ticker)){
     gains[which(gains$ticker == ts),'rsi_14'] <- rsi
     openPrice <- tdf %>%
       filter(time == min(time)) %>%
-      pull(currentPrice)
+      pull(currentPrice) %>%
+      round(2)
     gains[which(gains$ticker == ts),'openPrice'] <- openPrice
+    currentPrice <- tdf %>%
+      filter(time == max(time)) %>%
+      pull(currentPrice) %>%
+      round(2)
+    gains[which(gains$ticker == ts),'currentPrice'] <- currentPrice
   }, error = function(e){
-    cat('Problem calculating RSI and/or openPrice for', ts, '\n')
+    cat('Problem calculating RSI and/or openPrice, currentPrice for', ts, '\n')
   })
 }
 
@@ -109,6 +149,7 @@ gains %<>%
   ) %>%
   relocate(time, .after = ticker) %>%
   relocate(openPrice, .after = time) %>%
+  relocate(currentPrice, .after = openPrice) %>%
   relocate(rsi_14, .after = openPrice) %>%
   arrange(desc(rsi_14))
 
@@ -132,6 +173,21 @@ write_sheet(gains, ss = Sys.getenv('stockSheetsKey'), sheet = 'gainers')
 
 ### Create alert messages for intraday trades----
 alertMessages <- data.frame()
+#### Diverging----
+if(alerts %>% filter(alertType == 'diverging') %>% pull(yesOrNo) == 'yes'){
+  if(T %in% grepl('diverg', x = names(gains))){
+    divCols <- names(gains)[which(grepl('diverg', x = names(gains)))]
+    lastDivCol <- divCols[length(divCols)]
+    divergers <- gains[which(!is.na(gains[,lastDivCol])), c('ticker', 'time',lastDivCol)]
+    names(divergers)[ncol(divergers)] <- 'lastDivCol'
+    divergers %<>%
+      mutate(
+        msg = paste(ticker, lastDivCol, time, sep = '-')
+      )
+    tempMsg <- data.frame(msg = paste(divergers$msg, collapse = '______') %>% paste0('Intraday Diverging: ', .))
+    alertMessages %<>% bind_rows(tempMsg)
+  }
+}
 # #### Surging----
 # # If stock price on gainer list with positive slope
 # # is increasing by 3% or more 
@@ -172,7 +228,6 @@ alertMessages <- data.frame()
 # }
 # rm(increaseStopQuote)
 # 
-
 
 # Send messages----
 if(nrow(alertMessages) > 0){

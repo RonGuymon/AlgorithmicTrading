@@ -90,6 +90,9 @@ if(wday(dateToPredict) == 1){
 }else if(wday(dateToPredict) == 7){
   dateToPredict <- dateToPredict + 2
 }
+# Load an existing model or create a new model?----
+loadExistingModel <- F # If T, will not create a new model
+existingModelPath <- './firmSpecificModels/'
 # Loop through each ticker, create a model, and a prediction----
 for(stm in stocksToModel){
   iter <- iter + 1
@@ -152,10 +155,31 @@ for(stm in stocksToModel){
     }
     
     # Calculate the recent price relative to the 255 day min and max----
-    df %<>%
-      mutate(
-        
-      )
+    minMaxDays <- c(14,21,28,35,40)
+    for(mmd in minMaxDays){
+      cat('Diverging strategy', mmd, '\n')
+      tryCatch({
+        # df %<>%
+        #   mutate(
+        #     minPrice = zoo::rollapplyr(adjusted, width = mmd, align = 'right', FUN = min, fill = NA)
+        #     , maxPrice = zoo::rollmax(adjusted, k = mmd, align = 'right', fill = NA)
+        #   )
+        tdf <- divergingStrategy(df %>% rename(time = date, currentPrice = adjusted), periods = mmd) %>%
+          select(ticker, time, pLessMin, pLessMax, rsiChangeMin, rsiChangeMax, divergence) %>%
+          rename(date = time) %>%
+          mutate(
+            divergence = case_when(
+              grepl('buy', x = divergence) ~ 1
+              , grepl('sell', x = divergence) ~ -1
+              , T ~ 0
+            )
+          )
+        names(tdf)[3:ncol(tdf)] <- paste(c('pLessMin', 'pLessMax', 'rsiChangeMin', 'rsiChangeMax', 'divergence'), mmd, sep = '_')
+        df %<>% left_join(tdf, by = c('ticker', 'date'))
+      }, error = function(e){
+        cat('Problem calculating the diverging strategy ', mmd, '\n')
+      })
+    }
     
     # Strategy indicators----
     df %<>%
@@ -244,33 +268,45 @@ for(stm in stocksToModel){
     dtrain <- xgb.DMatrix(data = data.matrix(train_data), label = train_labels)
     dtest <- xgb.DMatrix(data = data.matrix(test_data), label = test_labels)
     dpredict <- xgb.DMatrix(data = data.matrix(prediction_data))
-    # xgb.train approach----
-    modelParams <- list(objective = 'binary:logistic')
-    # modelParams <- list(objective = 'multi:softprob'
-    #                     , num_class = 4)
-    watchlist <- list(train = dtrain, test = dtest)
-    modelT <- xgb.train(params = modelParams
-                        , data = dtrain
-                        , nrounds = 600
-                        , watchlist = watchlist
-                        , max.depth = 6
-                        , eta = .01
-                        , subsample = 1
-                        , early_stopping_rounds = 5)
-    # e <- data.frame(modelT$evaluation_log)
-    # names(e)[2:3] <- c('train_loss', 'test_loss')
-    # e %>%
-    #   pivot_longer(cols = c(train_loss:test_loss), names_to = 'lossType', values_to = 'loss') %>%
-    #   ggplot(aes(x = iter, y = loss, color = lossType)) + 
-    #   geom_line()
+    
+    if(loadExistingModel == T){
+      # Load an existing model----
+      modelT <- xgb.load(paste0(existingModelPath, gsub('\\.rds', '', stm), '.model'))
+    }else{
+      # Create a new model using xgb.train approach----
+      modelParams <- list(objective = 'binary:logistic')
+      # modelParams <- list(objective = 'multi:softprob'
+      #                     , num_class = 4)
+      watchlist <- list(train = dtrain, test = dtest)
+      modelT <- xgb.train(params = modelParams
+                          , data = dtrain
+                          , nrounds = 600
+                          , watchlist = watchlist
+                          , max.depth = 6
+                          , eta = .01
+                          , subsample = 1
+                          , early_stopping_rounds = 5)
+      # e <- data.frame(modelT$evaluation_log)
+      # names(e)[2:3] <- c('train_loss', 'test_loss')
+      # e %>%
+      #   pivot_longer(cols = c(train_loss:test_loss), names_to = 'lossType', values_to = 'loss') %>%
+      #   ggplot(aes(x = iter, y = loss, color = lossType)) + 
+      #   geom_line()
+      
+      # Save the model----
+      modelFileName <- paste0(gsub('\\.rds', '', stm), '.model')
+      xgb.save(modelT, paste0(existingModelPath, modelFileName))
+      
+    }
+    # Evaluate model effectiveness----
     predT <- predict(modelT, dtest)
     testError <- round(mean(as.numeric(predT > .5) != test_labels), 2)
     paste0('test-error=', testError) # error
     # Positive predictive value (precision) is most meaningful to me
-    quantile(predT, seq(0,1,.2))
+    # quantile(predT, seq(0,1,.2))
     confM <- confusionMatrix(factor(as.numeric(predT > quantile(predT, .8)), levels = c(1,0)) 
                              , reference = factor(test_labels, levels = c(1,0)))
-    # # Variable importance
+    # # Variable importance----
     # importanceRaw <- xgb.importance(names(train_data),model = modelT)
     # xgb.plot.importance(importanceRaw[1:10,])
     # # Trees
@@ -278,24 +314,24 @@ for(stm in stocksToModel){
     # xgb.plot.tree(model = modelT, trees = 99)
     # # Test whether results make sense
     # chisq.test(train_data$wday, train_labels)
-    # Save the model----
-    modelFileName <- paste0(gsub('\\.rds', '', stm), '.model')
-    xgb.save(modelT, paste0('./firmSpecificModels/', modelFileName))
-    # # Load the model----
-    # mloadT <- xgb.load('aapl.model')
-    # predict(mloadT, dtest)
-    # Add data to the Google Sheet, especially the prediction----
     
+
+    # Add data to the Google Sheet, especially the prediction----
+    divRecent <- divergingStrategy(df[,c('ticker', 'date', 'adjusted')] %>% rename(time = date, currentPrice = adjusted), periods = 40) %>%
+      rename(date = time) %>%
+      filter(date == max(date, na.rm = T)) %>%
+      pull(divergence)
     newObservation <- data.frame(
       ticker = gsub('\\.rds', '', stm)
       , date = Sys.Date()
       , price = df[(nrow(df)-1),'adjusted']
       , return_1 = df[(nrow(df)-1),'return_1']
       , return_10 = df[(nrow(df)-1),'return_10']
+      , divergence = divRecent
       , predictionDate = df[nrow(df),'date']
       , testError = testError
-      , posPredValue = confM$byClass[which(names(confM$byClass) == 'Pos Pred Value')] %>% round(2)
-      , predictionProb = round(predict(modelT, dpredict), 2)
+      , posPredValue = confM$byClass[which(names(confM$byClass) == 'Pos Pred Value')][[1]] %>% round(2)
+      , predictionProb = round(predict(modelT, dpredict), 3)
     ) %>%
       mutate(
         prediction = ifelse(predictionProb >=quantile(predT, .8), 'buy', NA)
@@ -305,6 +341,7 @@ for(stm in stocksToModel){
     cat('Problem with ', stm, '---------\n')
   })
 }
+system('say done yo')
 # dfgs <- dataForGoogleSheet
 dataForGoogleSheet %<>% 
   arrange(prediction, desc(posPredValue), desc(price)) %>%
@@ -313,6 +350,16 @@ dataForGoogleSheet %<>%
   )
 
 # Add the predictions to the Google Sheet----
+# Refresh token so that I can get data from the Google Sheet
+# https://cran.r-project.org/web/packages/googlesheets/README.html
+
+# gToken <- gs4_auth() # Run this the first time to get the oAuth information
+# saveRDS(gToken, "gToken.rds") # Save the oAuth information for non-interactive use
+# suppressWarnings(readRDS("gToken.rds")) # Needs an interactive environment
+suppressWarnings(gs4_auth(email = Sys.getenv('googleSheetsEmail')
+                          , token = "gToken.rds")) # Auto refreshes stale oAuth token
+# allSheets <- gs4_find(gToken) # Read in the metadata for all files in the account. Only need to run the first time to get the sheet key.
+
 write_sheet(dataForGoogleSheet, ss = Sys.getenv('stockSheetsKey'), sheet = 'stocksToBuy')
 
 

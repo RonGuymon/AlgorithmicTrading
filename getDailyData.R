@@ -69,7 +69,7 @@ suppressWarnings(gs4_auth(email = Sys.getenv('googleSheetsEmail')
 
 # Read in stocks Google sheet to see what stocks I'm interested in watching----
 suppressMessages(stocks <- read_sheet(Sys.getenv('stockSheetsKey'), sheet = 'stocks'
-                                      , col_types = 'cddd'))
+                                      , col_types = 'cdddc'))
 stocks %<>%
   mutate(
     type = ifelse(is.na(qty), 'watch', 'own')
