@@ -55,11 +55,12 @@ maxMinPeriods <- c(10,15,20,25,30)
 gains <- data.frame()
 for(mp in maxMinPeriods){
   cat('Diverging strategy with periods =', mp, '\n')
-  tdf <- divergingStrategy(df = idm, periods = mp) %>%
-    group_by(ticker) %>%
-    filter(time == max(time, na.rm = T)) %>%
-    select(ticker, time, divergence) %>%
-    filter(!is.na(divergence))
+  tryCatch({
+    tdf <- divergingStrategy(df = idm, periods = mp) %>%
+      group_by(ticker) %>%
+      filter(time == max(time, na.rm = T)) %>%
+      select(ticker, time, divergence) %>%
+      filter(!is.na(divergence))
     if(nrow(tdf) > 0){
       names(tdf)[ncol(tdf)] <- paste0('divergence_', mp)
       if(nrow(gains) == 0){
@@ -76,10 +77,15 @@ for(mp in maxMinPeriods){
         }
       }
     }
-  }
-gains %<>% mutate(
-  time = as.POSIXct(time, origin = '1970-01-01')
-)
+  }, error = function(e){
+    cat('Not enough periods for diverging', mp, '\n')
+  })
+}
+if(nrow(gains) > 0){
+  gains %<>% mutate(
+    time = as.POSIXct(time, origin = '1970-01-01')
+  )
+}
 
 
 

@@ -91,7 +91,11 @@ if(wday(dateToPredict) == 1){
   dateToPredict <- dateToPredict + 2
 }
 # Load an existing model or create a new model?----
-loadExistingModel <- F # If T, will not create a new model
+if(wday(Sys.Date()) == 7){
+  loadExistingModel <- F
+}else{
+  loadExistingModel <- F # If T, will not create a new model
+}
 existingModelPath <- './firmSpecificModels/'
 # Loop through each ticker, create a model, and a prediction----
 for(stm in stocksToModel){
@@ -154,17 +158,14 @@ for(stm in stocksToModel){
       names(df)[ncol(df)] <- paste0('rsi_', rw)
     }
     
-    # Calculate the recent price relative to the 255 day min and max----
-    minMaxDays <- c(14,21,28,35,40)
+    # Calculate the number of days since the last divergence----
+    minMaxDays <- c(40)
     for(mmd in minMaxDays){
       cat('Diverging strategy', mmd, '\n')
       tryCatch({
-        # df %<>%
-        #   mutate(
-        #     minPrice = zoo::rollapplyr(adjusted, width = mmd, align = 'right', FUN = min, fill = NA)
-        #     , maxPrice = zoo::rollmax(adjusted, k = mmd, align = 'right', fill = NA)
-        #   )
-        tdf <- divergingStrategy(df %>% rename(time = date, currentPrice = adjusted), periods = mmd) %>%
+        tdf <- divergingStrategy(df %>% rename(time = date
+                                               , currentPrice = adjusted)
+                                 , periods = mmd) %>%
           select(ticker, time, pLessMin, pLessMax, rsiChangeMin, rsiChangeMax, divergence) %>%
           rename(date = time) %>%
           mutate(
@@ -173,14 +174,60 @@ for(stm in stocksToModel){
               , grepl('sell', x = divergence) ~ -1
               , T ~ 0
             )
-          )
-        names(tdf)[3:ncol(tdf)] <- paste(c('pLessMin', 'pLessMax', 'rsiChangeMin', 'rsiChangeMax', 'divergence'), mmd, sep = '_')
+            , daysSinceBuy = case_when(
+              divergence == 1 ~ date
+            )
+            , daysSinceBuy = zoo::na.locf(daysSinceBuy, na.rm = F)
+            , daysSinceBuy = date - daysSinceBuy
+            , daysSinceBuy = case_when(
+              !is.na(daysSinceBuy) ~ daysSinceBuy
+              , is.na(daysSinceBuy) ~ max(daysSinceBuy, na.rm = T)
+            )
+            , daysSinceSell = case_when(
+              divergence == -1 ~ date
+            )
+            , daysSinceSell = zoo::na.locf(daysSinceSell, na.rm = F)
+            , daysSinceSell = date - daysSinceSell
+            , daysSinceSell = case_when(
+              !is.na(daysSinceSell) ~ daysSinceSell
+              , is.na(daysSinceSell) ~ max(daysSinceSell, na.rm = T)
+            )
+          ) %>%
+          select(-divergence)
+        names(tdf)[3:ncol(tdf)] <- paste(names(tdf)[3:ncol(tdf)], mmd, sep = '_')
+        
         df %<>% left_join(tdf, by = c('ticker', 'date'))
       }, error = function(e){
         cat('Problem calculating the diverging strategy ', mmd, '\n')
       })
     }
     
+    # Calculate the adjusted price relative to the min and max price----
+    minMaxPeriods <- c(40, 255)
+    for(mmp in minMaxPeriods){
+      tryCatch({
+        df <- df %>%
+          mutate(
+            adjRelMin = rollapply(adjusted
+                                  , width = mmp
+                                  , align = 'right'
+                                  , FUN = min, na.rm = T
+                                  , fill = NA
+            )
+            , adjRelMin = (adjusted - adjRelMin)/adjRelMin
+            , adjRelMax = rollapply(adjusted
+                                    , width = mmp
+                                    , align = 'right'
+                                    , FUN = max, na.rm = T
+                                    , fill = NA
+            )
+            , adjRelMax = (adjusted - adjRelMax)/adjRelMax
+          )
+        names(df)[(ncol(df)-1):ncol(df)] <- paste(names(df)[(ncol(df)-1):ncol(df)], mmp, sep = '_')
+      }, error = function(e){
+        cat('Cannnot calculate the min and max for period', mmp, '\n')
+      })
+    }
     # Strategy indicators----
     df %<>%
       mutate(
@@ -191,7 +238,7 @@ for(stm in stocksToModel){
     df %<>% left_join(marketStocksWide, by = 'date')
     # Information from prior periods----
     # names(df)
-    daysPrior <- c(1,7,14,28,364)
+    daysPrior <- c(1,2,3,4,5,6,7,14,28,364)
     colsToLag <- names(df)[7:ncol(df)]
     
     for(dp in daysPrior){
@@ -223,6 +270,7 @@ for(stm in stocksToModel){
     returnLevels <- quantile(df$return_1, seq(0,1,.25), na.rm = T)
     df %<>%
       mutate(
+        # return_1_binaryDv = ifelse(return_1 > returnLevels[4], 1, 0) # Try to capture days in which the return will be large
         return_1_binaryDv = ifelse(return_1 > 0, 1, 0)
         # return_1_threeDv = case_when(
         #   return_1 < returnLevels[2] ~ 0
@@ -264,7 +312,7 @@ for(stm in stocksToModel){
     test_data <- df2[-trainIndex,-which(names(df2) %in% dv)]
     test_labels <- df2[-trainIndex,which(names(df2) %in% dv)]
     prediction_data <- predictionData[,-which(names(df2) %in% dv)]
-    # Convert to sparse matrix----
+    # Convert to sparse matrix and create the model----
     dtrain <- xgb.DMatrix(data = data.matrix(train_data), label = train_labels)
     dtest <- xgb.DMatrix(data = data.matrix(test_data), label = test_labels)
     dpredict <- xgb.DMatrix(data = data.matrix(prediction_data))
@@ -282,15 +330,16 @@ for(stm in stocksToModel){
                           , data = dtrain
                           , nrounds = 600
                           , watchlist = watchlist
-                          , max.depth = 6
+                          , max.depth = 8
                           , eta = .01
                           , subsample = 1
+                          # , min.child.weight = .8
                           , early_stopping_rounds = 5)
       # e <- data.frame(modelT$evaluation_log)
       # names(e)[2:3] <- c('train_loss', 'test_loss')
       # e %>%
       #   pivot_longer(cols = c(train_loss:test_loss), names_to = 'lossType', values_to = 'loss') %>%
-      #   ggplot(aes(x = iter, y = loss, color = lossType)) + 
+      #   ggplot(aes(x = iter, y = loss, color = lossType)) +
       #   geom_line()
       
       # Save the model----
@@ -317,17 +366,34 @@ for(stm in stocksToModel){
     
 
     # Add data to the Google Sheet, especially the prediction----
-    divRecent <- divergingStrategy(df[,c('ticker', 'date', 'adjusted')] %>% rename(time = date, currentPrice = adjusted), periods = 40) %>%
-      rename(date = time) %>%
-      filter(date == max(date, na.rm = T)) %>%
-      pull(divergence)
+    tryCatch({
+      divRecent <- divergingStrategy(df[,c('ticker', 'date', 'adjusted')] %>% 
+                                       rename(time = date, currentPrice = adjusted)
+                                     , periods = 40) 
+      lastDiv <- divRecent %>%
+        filter(!is.na(divergence)) %>%
+        .[nrow(.),] %>%
+        select(time, divergence)
+      daysSinceLastDiv <- difftime(Sys.Date(), lastDiv[1,'time'][[1]], units = 'days') %>% as.numeric()
+      lastDivergence <- lastDiv[1,'divergence'][[1]]
+      divergingToday <- divRecent %>%
+        rename(date = time) %>%
+        filter(date == max(date, na.rm = T)) %>%
+        pull(divergence)
+    }, error = function(e){
+      cat('Problem with divergence', stm, '\n')
+      daysSinceLastDiv <<- NA
+      lastDiv <<- NA
+    })
     newObservation <- data.frame(
       ticker = gsub('\\.rds', '', stm)
       , date = Sys.Date()
       , price = df[(nrow(df)-1),'adjusted']
       , return_1 = df[(nrow(df)-1),'return_1']
       , return_10 = df[(nrow(df)-1),'return_10']
-      , divergence = divRecent
+      , divergence = divergingToday
+      , daysSinceLastDiv = daysSinceLastDiv
+      , lastDivergence = lastDivergence
       , predictionDate = df[nrow(df),'date']
       , testError = testError
       , posPredValue = confM$byClass[which(names(confM$byClass) == 'Pos Pred Value')][[1]] %>% round(2)
@@ -344,11 +410,12 @@ for(stm in stocksToModel){
 system('say done yo')
 # dfgs <- dataForGoogleSheet
 dataForGoogleSheet %<>% 
-  arrange(prediction, desc(posPredValue), desc(price)) %>%
+  arrange(daysSinceLastDiv, prediction, desc(posPredValue), desc(price)) %>%
   mutate(
     prediction = as.character(prediction)
   )
 
+write_rds(dataForGoogleSheet, 'stocksToBuy.rds', compress = 'gz')
 # Add the predictions to the Google Sheet----
 # Refresh token so that I can get data from the Google Sheet
 # https://cran.r-project.org/web/packages/googlesheets/README.html
